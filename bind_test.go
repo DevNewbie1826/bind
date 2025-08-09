@@ -2,11 +2,11 @@ package bind_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/DevNewbie1826/bind"
@@ -64,13 +64,19 @@ type DeepBinder struct {
 
 func (b *DeepBinder) Bind(r *http.Request) error { return nil }
 
-// 임베디드 구조체 테스트용
 type EmbeddedPayload struct {
 	TestPayload
 	Extra string `json:"extra"`
 }
 
 func (p *EmbeddedPayload) Bind(r *http.Request) error { return nil }
+
+type UnexportedFieldPayload struct {
+	unexportedBinder *TestPayload `form:"unexported"`
+	Exported         string       `form:"exported"`
+}
+
+func (p *UnexportedFieldPayload) Bind(r *http.Request) error { return nil }
 
 // --- 테스트 함수 ---
 
@@ -257,9 +263,9 @@ func TestErrorToMap_Nil(t *testing.T) {
 
 func TestCustomDecoderRegistration(t *testing.T) {
 	originalDecoder := bind.DefaultDecoder
-	originalJSONDecoder := func(r *http.Request, v any) error {
-		defer r.Body.Close()
-		return json.NewDecoder(r.Body).Decode(v)
+	originalJSONDecoder, ok := bind.GetDecoder(bind.ContentTypeJSON)
+	if !ok {
+		t.Fatal("failed to get original JSON decoder")
 	}
 
 	t.Cleanup(func() {
@@ -283,4 +289,88 @@ func TestCustomDecoderRegistration(t *testing.T) {
 	if !errors.As(err, &bindErr) || bindErr.Unwrap() != customErr {
 		t.Errorf("Expected error to wrap '%v', but got '%v'", customErr, err)
 	}
+}
+
+// --- 추가된 테스트 케이스 ---
+
+func TestGetContentType(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected bind.ContentType
+	}{
+		{"text/plain; charset=utf-8", bind.ContentTypePlainText},
+		{"application/json", bind.ContentTypeJSON},
+		{"application/problem+json", bind.ContentTypeJSON},
+		{"text/xml; charset=utf-8", bind.ContentTypeXML},
+		{"application/x-www-form-urlencoded", bind.ContentTypeForm},
+		{"multipart/form-data; boundary=...", bind.ContentTypeMultipart},
+		{"text/html", bind.ContentTypeHTML},
+		{"text/event-stream", bind.ContentTypeEventStream},
+		{"application/unknown", bind.ContentTypeUnknown},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := bind.GetContentType(tc.input); got != tc.expected {
+				t.Errorf("expected %v, got %v", tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestAction_MalformedMultipartForm(t *testing.T) {
+	// A body that is missing the final boundary
+	body := new(bytes.Buffer)
+	body.WriteString("--BOUNDARY\r\n")
+	body.WriteString(`Content-Disposition: form-data; name="name"` + "\r\n\r\n")
+	body.WriteString("multi\r\n")
+
+	req, _ := http.NewRequest("POST", "/", body)
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=BOUNDARY")
+
+	payload := &TestPayload{}
+	err := bind.Action(req, payload)
+	if err == nil {
+		t.Fatal("expected error for malformed multipart form, got nil")
+	}
+	if !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Errorf("expected multipart EOF error, got %v", err)
+	}
+}
+
+func TestAction_UnexportedField(t *testing.T) {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	writer.WriteField("exported", "value")
+	writer.Close()
+
+	req, _ := http.NewRequest("POST", "/", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	payload := &UnexportedFieldPayload{}
+	// This should not panic and should bind the exported field.
+	if err := bind.Action(req, payload); err != nil {
+		t.Fatalf("unexpected error with unexported field: %v", err)
+	}
+	if payload.Exported != "value" {
+		t.Errorf("expected exported field to be 'value', got '%s'", payload.Exported)
+	}
+}
+
+// TestConcurrentBinding - `go test -race`를 통해 캐시의 동시성 안전성을 검증합니다.
+func TestConcurrentBinding(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, _ := http.NewRequest("POST", "/", strings.NewReader(`{"name":"test", "value":42}`))
+			req.Header.Set("Content-Type", "application/json")
+			payload := &TestPayload{}
+			if err := bind.Action(req, payload); err != nil {
+				t.Errorf("concurrent binding failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }

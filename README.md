@@ -19,9 +19,17 @@ A simple, powerful, and highly performant Go package for binding request data (J
 go get github.com/DevNewbie1826/bind
 ```
 
-## Usage
+## Basic Usage
 
-### Example 1: Basic JSON Binding & Validation
+See the examples below for basic JSON and file upload binding.
+
+---
+
+## Advanced Usage
+
+### 1. Custom Decoders
+
+You can extend `bind` to support custom content types by registering a new decoder.
 
 ```go
 package main
@@ -30,99 +38,136 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/DevNewbie1826/bind"
 )
+
+// 1. Define your custom Content-Type (if not already standard)
+const MyCustomContentType bind.ContentType = 100
+
+// 2. Create a custom decoder function
+func decodeYAML(r *http.Request, v any) error {
+	// In a real implementation, you would use a YAML library.
+	// This is a simplified example.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(string(body), "name: John") {
+		// Simulate decoding into a struct
+		if p, ok := v.(*bind.TestPayload); ok {
+			p.Name = "John"
+			p.Value = 30
+		}
+		return nil
+	}
+	return fmt.Errorf("could not decode YAML")
+}
+
+func main() {
+	// 3. Register the new decoder
+	bind.RegisterDecoder(MyCustomContentType, decodeYAML)
+
+	// You also need a way to map the "application/x-yaml" header to your custom type.
+	// This part is left to the application logic, as GetContentType can also be customized.
+	
+	// ... server setup
+}
+```
+
+### 2. Error Handling Best Practices
+
+`bind.Action` returns a `bind.BindError`. You can use `errors.As` to inspect it and get detailed context about the failure.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+
+	"github.com/DevNewbie1826/bind"
+)
+
+type Address struct {
+	City string `json:"city"`
+}
+
+func (a *Address) Bind(r *http.Request) error {
+	if a.City == "" {
+		return fmt.Errorf("city is a required field")
+	}
+	return nil
+}
 
 type User struct {
-	Name  string `json:"name"`
-	Email string `json:"email"`
+	Address *Address `json:"address"`
 }
 
-// Bind implements the bind.Binder interface for custom validation.
-func (u *User) Bind(r *http.Request) error {
-	if u.Name == "" {
-		return fmt.Errorf("name is required")
-	}
-	return nil
-}
+func (u *User) Bind(r *http.Request) error { return nil }
 
-func userHandler(w http.ResponseWriter, r *http.Request) {
+func handler(w http.ResponseWriter, r *http.Request) {
 	var user User
+	// Important: Initialize nested pointers
+	user.Address = &Address{}
+
 	if err := bind.Action(r, &user); err != nil {
-		// The error will be a bind.BindError, which can be inspected.
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		var bindErr bind.BindError
+		// Use errors.As to check if the error is a BindError
+		if errors.As(err, &bindErr) {
+			// Now you can access the specific field and the underlying error
+			log.Printf("Binding failed on field '%s': %v", bindErr.Field, bindErr.Unwrap())
+			http.Error(w, fmt.Sprintf("Bad Request in field '%s'", bindErr.Field), http.StatusBadRequest)
+		} else {
+			// Handle other types of errors (e.g., malformed JSON)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
-	fmt.Fprintf(w, "User received: %+v\n", user)
+	fmt.Fprintf(w, "Success!")
 }
 
 func main() {
-	http.HandleFunc("/users", userHandler)
-	log.Println("Server starting on :8080...")
+	http.HandleFunc("/", handler)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
 
-### Example 2: File Uploads
+**Test with `curl`:**
+```sh
+# Send a request with a missing "city" field
+curl -X POST http://localhost:8080 -d '{"address":{}}' -H "Content-Type: application/json"
 
-Binding file uploads is automatic. Just define a field of type `*multipart.FileHeader` (for a single file) or `[]*multipart.FileHeader` (for multiple files) with a `form` tag.
+# Server will log:
+# Binding failed on field 'Address': city is a required field
+
+# Client will receive:
+# Bad Request in field 'Address'
+```
+
+### 3. Configuring Multipart Memory
+
+For services that handle large file uploads, it's crucial to control memory usage. You can set the maximum memory for multipart form parsing globally.
+
+It's best to do this once during application startup using an `init` function.
 
 ```go
 package main
 
 import (
-	"fmt"
-	"log"
-	"mime/multipart"
-	"net/http"
-
 	"github.com/DevNewbie1826/bind"
+	// ... other imports
 )
 
-// Set a custom memory limit for multipart forms (e.g., 64 MB).
-// It's good practice to set this during application startup.
 func init() {
-	bind.SetMaxMultipartMemory(64 << 20)
+    // Set max memory for multipart forms to 64MB
+    bind.SetMaxMultipartMemory(64 << 20)
 }
 
-type AvatarUpload struct {
-	UserID string                `form:"userId"`
-	Avatar *multipart.FileHeader `form:"avatar"`
-}
-
-func (p *AvatarUpload) Bind(r *http.Request) error {
-	if p.UserID == "" {
-		return fmt.Errorf("userId is required")
-	}
-	if p.Avatar == nil {
-		return fmt.Errorf("avatar file is required")
-	}
-	return nil
-}
-
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	var payload AvatarUpload
-	if err := bind.Action(r, &payload); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	fmt.Fprintf(w, "Uploaded %s for user %s (Size: %d bytes)\n", payload.Avatar.Filename, payload.UserID, payload.Avatar.Size)
-}
-
-func main() {
-	http.HandleFunc("/upload", uploadHandler)
-	log.Println("Server starting on :8080...")
-	log.Fatal(http.ListenAndServe(":8080", nil))
-}
-```
-
-**Test it with `curl`:**
-
-```sh
-curl -X POST http://localhost:8080/upload \
-  -F "userId=123" \
-  -F "avatar=@/path/to/your/image.jpg"
+// ... your application code
 ```
 
 ---
@@ -148,9 +193,17 @@ curl -X POST http://localhost:8080/upload \
 go get github.com/DevNewbie1826/bind
 ```
 
-## 사용법
+## 기본 사용법
 
-### 예제 1: 기본 JSON 바인딩 및 유효성 검사
+기본적인 JSON 및 파일 업로드 바인딩은 아래 예제를 참고하세요.
+
+---
+
+## 고급 사용법
+
+### 1. 커스텀 디코더 등록
+
+`bind`를 확장하여 커스텀 Content-Type을 지원하도록 새로운 디코더를 등록할 수 있습니다.
 
 ```go
 package main
@@ -159,99 +212,135 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/DevNewbie1826/bind"
 )
 
-type User struct {
-	Name  string `json:"name"`
-	Email string `json:"email"`
-}
+// 1. 커스텀 Content-Type 정의 (표준이 아닌 경우)
+const MyCustomContentType bind.ContentType = 100
 
-// Bind - 커스텀 유효성 검사를 위해 bind.Binder 인터페이스를 구현합니다.
-func (u *User) Bind(r *http.Request) error {
-	if u.Name == "" {
-		return fmt.Errorf("이름은 필수 항목입니다")
+// 2. 커스텀 디코더 함수 생성
+func decodeYAML(r *http.Request, v any) error {
+	// 실제 구현에서는 YAML 라이브러리를 사용해야 합니다.
+	// 여기서는 간단한 예시입니다.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
 	}
-	return nil
-}
-
-func userHandler(w http.ResponseWriter, r *http.Request) {
-	var user User
-	if err := bind.Action(r, &user); err != nil {
-		// 반환된 에러는 bind.BindError 타입이며, 상세 내용을 확인할 수 있습니다.
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	if strings.Contains(string(body), "name: John") {
+		// 구조체로 디코딩하는 것을 시뮬레이션
+		if p, ok := v.(*bind.TestPayload); ok {
+			p.Name = "John"
+			p.Value = 30
+		}
+		return nil
 	}
-	fmt.Fprintf(w, "수신된 사용자: %+v\n", user)
+	return fmt.Errorf("YAML을 디코딩할 수 없습니다")
 }
 
 func main() {
-	http.HandleFunc("/users", userHandler)
-	log.Println("서버 시작 중 :8080...")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	// 3. 새로운 디코더 등록
+	bind.RegisterDecoder(MyCustomContentType, decodeYAML)
+
+	// "application/x-yaml" 헤더를 커스텀 타입에 매핑하는 로직도 필요합니다.
+	// GetContentType 또한 커스터마이징이 가능하므로, 이 부분은 애플리케이션 로직에 맡겨집니다.
+	
+	// ... 서버 설정
 }
 ```
 
-### 예제 2: 파일 업로드
+### 2. 에러 처리 베스트 프랙티스
 
-파일 업로드 바인딩은 자동으로 처리됩니다. `form` 태그와 함께 `*multipart.FileHeader`(단일 파일) 또는 `[]*multipart.FileHeader`(다중 파일) 타입의 필드를 선언하기만 하면 됩니다.
+`bind.Action`은 `bind.BindError`를 반환합니다. `errors.As`를 사용하여 에러를 검사하고 실패에 대한 상세한 컨텍스트를 얻을 수 있습니다.
 
 ```go
 package main
 
 import (
+	"errors"
 	"fmt"
+
 	"log"
-	"mime/multipart"
 	"net/http"
 
 	"github.com/DevNewbie1826/bind"
 )
 
-// init 함수에서 멀티파트 폼을 위한 커스텀 메모리 제한(예: 64MB)을 설정합니다.
-// 애플리케이션 시작 시에 설정하는 것이 좋습니다.
-func init() {
-	bind.SetMaxMultipartMemory(64 << 20)
+type Address struct {
+	City string `json:"city"`
 }
 
-type AvatarUpload struct {
-	UserID string                `form:"userId"`
-	Avatar *multipart.FileHeader `form:"avatar"`
-}
-
-func (p *AvatarUpload) Bind(r *http.Request) error {
-	if p.UserID == "" {
-		return fmt.Errorf("userId는 필수입니다")
-	}
-	if p.Avatar == nil {
-		return fmt.Errorf("avatar 파일은 필수입니다")
+func (a *Address) Bind(r *http.Request) error {
+	if a.City == "" {
+		return fmt.Errorf("city 필드는 필수입니다")
 	}
 	return nil
 }
 
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	var payload AvatarUpload
-	if err := bind.Action(r, &payload); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+type User struct {
+	Address *Address `json:"address"`
+}
+
+func (u *User) Bind(r *http.Request) error { return nil }
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	var user User
+	// 중요: 중첩된 포인터 초기화
+	user.Address = &Address{}
+
+	if err := bind.Action(r, &user); err != nil {
+		var bindErr bind.BindError
+		// errors.As를 사용하여 BindError인지 확인
+		if errors.As(err, &bindErr) {
+			// 특정 필드와 원본 에러에 접근 가능
+			log.Printf("필드 '%s'에서 바인딩 실패: %v", bindErr.Field, bindErr.Unwrap())
+			http.Error(w, fmt.Sprintf("필드 '%s'에 잘못된 요청", bindErr.Field), http.StatusBadRequest)
+		} else {
+			// 다른 종류의 에러 처리 (예: 잘못된 JSON 형식)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
-	fmt.Fprintf(w, "%%s 사용자를 위해 %%s 파일 업로드됨 (크기: %%d 바이트)\n", payload.UserID, payload.Avatar.Filename, payload.Avatar.Size)
+	fmt.Fprintf(w, "성공!")
 }
 
 func main() {
-	http.HandleFunc("/upload", uploadHandler)
-	log.Println("서버 시작 중 :8080...")
+	http.HandleFunc("/", handler)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
 
 **`curl`로 테스트하기:**
-
 ```sh
-curl -X POST http://localhost:8080/upload \
-  -F "userId=123" \
-  -F "avatar=@/path/to/your/image.jpg"
+# "city" 필드가 없는 요청 보내기
+curl -X POST http://localhost:8080 -d '{"address":{}}' -H "Content-Type: application/json"
+
+# 서버 로그:
+# 필드 'Address'에서 바인딩 실패: city 필드는 필수입니다
+
+# 클라이언트가 받는 응답:
+# 필드 'Address'에 잘못된 요청
 ```
 
----
+### 3. 멀티파트 메모리 설정
+
+대용량 파일 업로드를 처리하는 서비스에서는 메모리 사용량을 제어하는 것이 중요합니다. 멀티파트 폼 파싱을 위한 최대 메모리를 전역적으로 설정할 수 있습니다.
+
+애플리케이션 시작 시 `init` 함수를 사용하여 한 번만 설정하는 것이 가장 좋습니다.
+
+```go
+package main
+
+import (
+	"github.com/DevNewbie1826/bind"
+	// ... 다른 임포트
+)
+
+func init() {
+    // 멀티파트 폼을 위한 최대 메모리를 64MB로 설정
+    bind.SetMaxMultipartMemory(64 << 20)
+}
+
+// ... 애플리케이션 코드
+```
