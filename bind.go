@@ -2,10 +2,19 @@ package bind
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"sync"
+)
+
+const (
+	// maxRecursionDepth - 바인딩 시 최대 재귀 깊이
+	// 무한 재귀로 인한 스택 오버플로우를 방지합니다.
+	// maxRecursionDepth - The maximum recursion depth for binding.
+	// Prevents stack overflow from infinite recursion.
+	maxRecursionDepth = 1000
 )
 
 // Binder - 바인딩 인터페이스
@@ -24,8 +33,10 @@ var binderType = reflect.TypeOf(new(Binder)).Elem()
 
 // binderCache - Binder 필드 인덱스 캐시
 // 구조체 타입별로 Binder 인터페이스를 구현하는 필드의 인덱스를 캐싱하여 리플렉션 성능을 최적화합니다.
+// sync.Map은 이러한 "write-once, read-many" 시나리오에 적합합니다.
 // binderCache - A cache for Binder field indices.
 // Optimizes reflection performance by caching the indices of fields that implement the Binder interface for each struct type.
+// sync.Map is suitable for such "write-once, read-many" scenarios.
 var binderCache = &sync.Map{}
 
 // Action - 요청 바인딩 실행 함수
@@ -38,41 +49,52 @@ var binderCache = &sync.Map{}
 // 3. Finally, calls the Bind method on 'v' itself.
 func Action(r *http.Request, v Binder) error {
 	if err := getDecode()(r, v); err != nil {
-		return err
+		return BindError{Err: err}
 	}
-	return binder(r, reflect.ValueOf(v))
+	// 최상위 호출이므로 parentField는 비워두고, depth는 0에서 시작합니다.
+	return binder(r, reflect.ValueOf(v), "", 0)
 }
 
-// binder - 재귀적 바인딩 함수
-// 리플렉션을 사용하여 값(v)의 필드를 순회하고, Binder를 구현하는 필드에 대해 재귀적으로 binder를 호출합니다.
-// binder - The recursive binding function.
-// Uses reflection to iterate over the fields of a value (v) and recursively calls binder for fields that implement Binder.
-func binder(r *http.Request, rv reflect.Value) error {
+// binder - 재귀적 바인딩 함수 (필드 경로 및 깊이 추적 기능 추가)
+// Bind 호출 순서:
+// 1. 가장 깊은 중첩 수준의 필드부터 시작 (바텀업)
+// 2. 점차 상위 레벨로 이동
+// 3. 최종적으로 루트 구조체의 Bind 메서드 호출
+// binder - A recursive binding function (with field path and depth tracking).
+// Bind call order:
+// 1. Starts from the most deeply nested fields (bottom-up).
+// 2. Gradually moves to higher levels.
+// 3. Finally, calls the Bind method of the root struct.
+func binder(r *http.Request, rv reflect.Value, parentField string, depth int) error {
+	if depth > maxRecursionDepth {
+		return fmt.Errorf("max recursion depth (%d) exceeded", maxRecursionDepth)
+	}
+
 	if rv.Kind() == reflect.Ptr {
 		if rv.IsNil() {
-			return nil // 포인터가 nil이면 아무 작업도 하지 않음
+			return nil
 		}
 		rv = rv.Elem()
 	}
 
-	// Binder가 아닌 값은 처리하지 않음
 	if !rv.Addr().Type().Implements(binderType) {
 		return nil
 	}
 
-	// 구조체가 아닐 경우 바로 Bind 실행
 	if rv.Kind() != reflect.Struct {
-		return rv.Addr().Interface().(Binder).Bind(r)
+		if err := rv.Addr().Interface().(Binder).Bind(r); err != nil {
+			return BindError{Field: parentField, Err: err}
+		}
+		return nil
 	}
 
-	// 캐시에서 Binder 필드 인덱스 조회
 	rt := rv.Type()
 	var binderFields []int
 	if cached, ok := binderCache.Load(rt); ok {
 		binderFields = cached.([]int)
 	} else {
-		// 캐시에 없는 경우, 리플렉션으로 찾아 캐시에 저장
 		for i := 0; i < rv.NumField(); i++ {
+			// 임베디드 구조체도 처리하기 위해 rt.Field(i)를 사용
 			if rt.Field(i).Type.Implements(binderType) {
 				binderFields = append(binderFields, i)
 			}
@@ -80,15 +102,29 @@ func binder(r *http.Request, rv reflect.Value) error {
 		binderCache.Store(rt, binderFields)
 	}
 
-	// 캐시된 인덱스를 사용하여 필드 순회 및 재귀 호출
 	for _, i := range binderFields {
-		if err := binder(r, rv.Field(i)); err != nil {
-			return err
+		field := rv.Field(i)
+		fieldName := rt.Field(i).Name
+
+		fullPath := fieldName
+		if parentField != "" {
+			fullPath = parentField + "." + fieldName
+		}
+
+		if err := binder(r, field, fullPath, depth+1); err != nil {
+			var bindErr BindError
+			if errors.As(err, &bindErr) {
+				return err // 이미 BindError이므로 그대로 반환
+			}
+			// 새로운 에러인 경우에만 필드 정보를 추가하여 래핑
+			return BindError{Field: fullPath, Err: err}
 		}
 	}
 
-	// 바텀업 순서: 하위 필드 Binder 호출 후 최종적으로 자기 자신의 Bind 호출
-	return rv.Addr().Interface().(Binder).Bind(r)
+	if err := rv.Addr().Interface().(Binder).Bind(r); err != nil {
+		return BindError{Field: parentField, Err: err}
+	}
+	return nil
 }
 
 // ErrorToJSON - 에러를 JSON 형식으로 변환
