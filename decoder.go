@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	decoderMu          sync.RWMutex
-	decoders = map[ContentType]func(*http.Request, any) error{
+	decoderMu sync.RWMutex
+	decoders  = map[ContentType]func(*http.Request, any) error{
 		ContentTypeJSON:      decodeJSONRequest,
 		ContentTypeXML:       decodeXMLRequest,
 		ContentTypeForm:      decodeFormRequest,
