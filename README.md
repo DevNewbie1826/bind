@@ -1,5 +1,10 @@
 # `bind` (English)
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/DevNewbie1826/bind)](https://goreportcard.com/report/github.com/DevNewbie1826/bind)
+[![Go Reference](https://pkg.go.dev/badge/github.com/DevNewbie1826/bind.svg)](https://pkg.go.dev/github.com/DevNewbie1826/bind)
+
+Inspired by [go-chi/render](https://github.com/go-chi/render).
+
 A simple, powerful, and highly performant Go package for binding request data (JSON, XML, Form) to structs. It features recursive binding, detailed error pathing, file upload support, and is optimized for high-performance scenarios.
 
 ## Features
@@ -36,6 +41,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -174,6 +180,8 @@ func init() {
 
 # `bind` (한국어)
 
+[go-chi/render](https://github.com/go-chi/render)에서 영감을 받아 제작되었습니다.
+
 요청 데이터(JSON, XML, Form)를 Go 구조체에 바인딩하는 간단하고, 강력하며, 성능이 뛰어난 패키지입니다. 재귀적 바인딩, 상세한 오류 경로 추적, 파일 업로드 기능을 지원하며 고성능 시나리오에 최적화되어 있습니다.
 
 ## 주요 특징
@@ -210,6 +218,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -260,7 +269,6 @@ package main
 import (
 	"errors"
 	"fmt"
-
 	"log"
 	"net/http"
 
@@ -344,3 +352,14 @@ func init() {
 
 // ... 애플리케이션 코드
 ```
+---
+
+## License
+
+This project is licensed under the MIT License.
+
+---
+
+## 라이선스
+
+이 프로젝트는 MIT 라이선스를 따릅니다.
